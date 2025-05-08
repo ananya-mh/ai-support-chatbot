@@ -8,4 +8,4 @@ eventBus.on('message.received', ({ userId, message, timestamp }) => {
   
   // Optionally: log to a file, analytics service, or database
   // e.g., logMessageToDB(userId, message, timestamp);
-});
+}); 
