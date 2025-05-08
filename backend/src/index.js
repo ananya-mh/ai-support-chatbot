@@ -1,6 +1,7 @@
 import http from 'http';
 import dotenv from 'dotenv';
 import app from './app.js'; // Include the `.js` extension explicitly
+import './events/eventHandlers.js'; // <-- IMPORTANT: initialize event listeners
 
 // Load environment variables from .env
 dotenv.config();
