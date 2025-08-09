@@ -1,6 +1,10 @@
 import { useState } from "react";
 
-const Chatbot = () => {
+type ChatbotProps = {
+  sessionId: string;
+};
+
+const Chatbot = ({sessionId} : ChatbotProps) => {
   const [messages, setMessages] = useState<{ text: string; isUser: boolean }[]>([]);
   const [input, setInput] = useState("");
 
@@ -18,7 +22,7 @@ const Chatbot = () => {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: input }),
+        body: JSON.stringify({ message: input, sessionId }),
       });
       const data = await response.json();
       setMessages((prevMessages) => [
