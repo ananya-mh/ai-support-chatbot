@@ -71,14 +71,41 @@ async function upsertBatch(index, chunks, embeddings) {
   return validVectors.length;
 }
 
+const PROGRESS_FILE = path.join(__dirname, 'data', 'upsert-progress.json');
+
+// ─── Progress tracking for resume ────────────────────────────────────────────
+
+function loadProgress() {
+  if (fs.existsSync(PROGRESS_FILE)) {
+    return new Set(JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf-8')));
+  }
+  return new Set();
+}
+
+function saveProgress(doneIds) {
+  fs.writeFileSync(PROGRESS_FILE, JSON.stringify([...doneIds]), 'utf-8');
+}
+
 async function upsertAllChunks() {
   if (!fs.existsSync(CHUNKS_FILE)) {
     console.log('No chunks found. Run chunker.js first.');
     return;
   }
 
-  const chunks = JSON.parse(fs.readFileSync(CHUNKS_FILE, 'utf-8'));
-  console.log(`Loaded ${chunks.length} chunks from ${CHUNKS_FILE}\n`);
+  const allChunks = JSON.parse(fs.readFileSync(CHUNKS_FILE, 'utf-8'));
+  const doneIds = loadProgress();
+
+  // Filter out already-upserted chunks
+  const chunks = allChunks.filter(c => !doneIds.has(c.id));
+
+  console.log(`Loaded ${allChunks.length} total chunks`);
+  console.log(`Already upserted: ${doneIds.size}`);
+  console.log(`Remaining: ${chunks.length}\n`);
+
+  if (chunks.length === 0) {
+    console.log('All chunks already upserted! Nothing to do.');
+    return;
+  }
 
   const pc = initPinecone();
   const ai = initGemini();
@@ -102,16 +129,14 @@ async function upsertAllChunks() {
       const texts = batch.map(c => c.text);
       const embeddings = await embedTexts(ai, texts);
 
-      // Debug: log first batch details
-      if (batchNum === 1) {
-        console.log(`    DEBUG: got ${embeddings.length} embeddings`);
-        console.log(`    DEBUG: first embedding length: ${embeddings[0]?.length}`);
-        console.log(`    DEBUG: first embedding sample: [${embeddings[0]?.slice(0, 3).join(', ')}...]`);
-      }
       const count = await upsertBatch(index, batch, embeddings);
       totalUpserted += count;
 
-      console.log(`    ✓ Embedded and upserted ${count} vectors`);
+      // Mark these chunks as done
+      batch.forEach(c => doneIds.add(c.id));
+      saveProgress(doneIds);
+
+      console.log(`    ✓ Embedded and upserted ${count} vectors (${doneIds.size}/${allChunks.length} total)`);
 
       // Gemini free tier: be conservative to avoid 429s
       if (i + BATCH_SIZE < chunks.length) {
@@ -122,8 +147,14 @@ async function upsertAllChunks() {
       console.log(`    ✗ Batch failed: ${err.message}`);
 
       if (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED')) {
-        console.log(`    ⏳ Rate limited. Waiting 30s...`);
-        await new Promise(r => setTimeout(r, 30000));
+        // Check if it's a daily limit (contains "per day" or "1000")
+        if (err.message.includes('1000') || err.message.includes('PerDay')) {
+          console.log(`\n    🛑 Daily quota exhausted. Progress saved at ${doneIds.size}/${allChunks.length} chunks.`);
+          console.log(`    Run again tomorrow to continue.\n`);
+          break;
+        }
+        console.log(`    ⏳ Rate limited. Waiting 60s...`);
+        await new Promise(r => setTimeout(r, 60000));
         i -= BATCH_SIZE; // retry
       }
     }

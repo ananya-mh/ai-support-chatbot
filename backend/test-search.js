@@ -8,7 +8,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { searchDocs, formatDocsForPrompt } from './embeddingService.js';
+import { searchDocs, formatDocsForPrompt } from './src/services/embeddingService.js';
 
 const testQueries = [
   'how do I add data to Firestore?',

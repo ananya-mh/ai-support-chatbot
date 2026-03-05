@@ -2,6 +2,7 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as cheerio from 'cheerio';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,52 +62,159 @@ function fetchPage(url) {
 }
 
 function htmlToText(html) {
-  let content = html;
+  const $ = cheerio.load(html);
 
-  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-  const devsiteMatch = html.match(/<devsite-content[^>]*>([\s\S]*?)<\/devsite-content>/i);
-  const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  // ─── Remove noise: nav, sidebar, footer, breadcrumbs, feedback widgets ─────
+  $('nav, footer, header, .devsite-nav, .devsite-sidebar').remove();
+  $('[role="navigation"]').remove();
+  $('.devsite-banner, .devsite-feedback, .devsite-breadcrumb').remove();
+  $('style, script, noscript, svg, iframe').remove();
+  $('.devsite-code-buttons-container, .copy-code-button').remove();
 
-  if (articleMatch) content = articleMatch[1];
-  else if (devsiteMatch) content = devsiteMatch[1];
-  else if (mainMatch) content = mainMatch[1];
+  // ─── Find the main content area ────────────────────────────────────────────
+  let $content = $('article');
+  if ($content.length === 0) $content = $('devsite-content');
+  if ($content.length === 0) $content = $('main');
+  if ($content.length === 0) $content = $('body');
 
-  const codeBlocks = [];
-  content = content.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, (match, code) => {
-    const decoded = code
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-      .replace(/<[^>]+>/g, '');
-    codeBlocks.push(decoded.trim());
-    return `\n\`\`\`\nCODE_BLOCK_${codeBlocks.length - 1}\n\`\`\`\n`;
+  // ─── Handle language-tabbed code blocks ────────────────────────────────────
+  // Firebase docs have tabs for different languages (Web, iOS, Android, etc.)
+  // Keep only JavaScript/Web/Node.js tabs, remove the rest
+  $content.find('[data-tab], [data-language], .devsite-click-to-copy').each((_, el) => {
+    const $el = $(el);
+    const tab = ($el.attr('data-tab') || '').toLowerCase();
+    const lang = ($el.attr('data-language') || '').toLowerCase();
+    const text = $el.text().toLowerCase();
+
+    // Keep Web/JavaScript/Node.js code, remove everything else
+    const keepLangs = ['javascript', 'js', 'web', 'node', 'node.js', 'typescript'];
+    const removeLangs = ['swift', 'objective-c', 'java', 'kotlin', 'python', 'go', 'php', 'ruby', 'c#', 'unity', 'dart', 'flutter', 'ios', 'android'];
+
+    const langLabel = tab || lang;
+    if (removeLangs.some(l => langLabel.includes(l))) {
+      $el.remove();
+    }
   });
 
-  content = content.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (match, code) => {
-    const decoded = code.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/<[^>]+>/g, '');
-    return `\`${decoded}\``;
+  // Also remove tab buttons/selectors for other platforms
+  $content.find('.devsite-tab, [role="tab"]').each((_, el) => {
+    const label = $(el).text().toLowerCase().trim();
+    const removeTabs = ['swift', 'objective-c', 'java', 'kotlin', 'python', 'go', 'php', 'ruby', 'c#', 'unity', 'dart', 'flutter', 'ios', 'android'];
+    if (removeTabs.some(l => label.includes(l))) {
+      $(el).remove();
+    }
   });
 
-  content = content.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
-  content = content.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
-  content = content.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
-  content = content.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n');
-  content = content.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
-  content = content.replace(/<\/p>/gi, '\n\n');
-  content = content.replace(/<br\s*\/?>/gi, '\n');
-  content = content.replace(/<[^>]+>/g, '');
+  // ─── Convert to markdown ───────────────────────────────────────────────────
+  let output = '';
 
-  content = content.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
+  function processNode(el) {
+    const $el = $(el);
+    const tag = el.tagName?.toLowerCase();
 
-  codeBlocks.forEach((block, i) => {
-    content = content.replace(`CODE_BLOCK_${i}`, block);
-  });
+    if (el.type === 'text') {
+      const text = $el.text();
+      if (text.trim()) output += text;
+      return;
+    }
 
-  content = content.replace(/\n{3,}/g, '\n\n');
-  content = content.replace(/[ \t]+/g, ' ');
+    switch (tag) {
+      case 'h1':
+        output += `\n# ${$el.text().trim()}\n\n`;
+        break;
+      case 'h2':
+        output += `\n## ${$el.text().trim()}\n\n`;
+        break;
+      case 'h3':
+        output += `\n### ${$el.text().trim()}\n\n`;
+        break;
+      case 'h4':
+        output += `\n#### ${$el.text().trim()}\n\n`;
+        break;
+      case 'p':
+        $el.contents().each((_, child) => processNode(child));
+        output += '\n\n';
+        break;
+      case 'pre': {
+        // Code block — extract text content, wrap in markdown fences
+        const codeText = $el.text().trim();
+        if (codeText) {
+          output += `\n\`\`\`\n${codeText}\n\`\`\`\n\n`;
+        }
+        break;
+      }
+      case 'code': {
+        // Inline code (not inside <pre>)
+        if ($el.parent()[0]?.tagName?.toLowerCase() !== 'pre') {
+          output += `\`${$el.text().trim()}\``;
+        }
+        break;
+      }
+      case 'ul':
+      case 'ol':
+        $el.children('li').each((i, li) => {
+          const prefix = tag === 'ol' ? `${i + 1}. ` : '- ';
+          output += `${prefix}${$(li).text().trim()}\n`;
+        });
+        output += '\n';
+        break;
+      case 'table': {
+        // Convert tables to readable text
+        $el.find('tr').each((_, tr) => {
+          const cells = [];
+          $(tr).find('td, th').each((_, cell) => {
+            cells.push($(cell).text().trim());
+          });
+          if (cells.length > 0) {
+            output += cells.join(' | ') + '\n';
+          }
+        });
+        output += '\n';
+        break;
+      }
+      case 'a': {
+        const href = $el.attr('href') || '';
+        const text = $el.text().trim();
+        if (text && href && !href.startsWith('#')) {
+          output += `${text}`;
+        } else if (text) {
+          output += text;
+        }
+        break;
+      }
+      case 'strong':
+      case 'b':
+        output += `**${$el.text().trim()}**`;
+        break;
+      case 'em':
+      case 'i':
+        output += `*${$el.text().trim()}*`;
+        break;
+      case 'br':
+        output += '\n';
+        break;
+      default:
+        // For div, section, span, etc. — recurse into children
+        $el.contents().each((_, child) => processNode(child));
+        break;
+    }
+  }
 
-  return content.trim();
+  // Process all children of the content area
+  $content.contents().each((_, child) => processNode(child));
+
+  // ─── Final cleanup ─────────────────────────────────────────────────────────
+  output = output
+    .replace(/\n{3,}/g, '\n\n')           // Collapse excessive newlines
+    .replace(/[ \t]+$/gm, '')              // Trim trailing spaces per line
+    .replace(/^[ \t]+/gm, (m) => {         // Preserve code indentation, trim others
+      return m;
+    })
+    .replace(/^\s*\n/gm, '\n')             // Remove lines that are only whitespace
+    .replace(/\n{3,}/g, '\n\n')            // One more pass
+    .trim();
+
+  return output;
 }
 
 async function scrapeFirebaseDocs() {
