@@ -1,29 +1,13 @@
-import { getLLMResponse } from '../services/llmService.js';
+/**
+ * controllers/chatController.js
+ *
+ * Updated to use the agentic loop via MCP instead of direct LLM calls.
+ */
+
+import { runAgent } from '../services/agentService.js';
 import eventBus from '../events/eventBus.js';
 import ChatSession from '../schema/chatSessionModel.js';
 import ChatMessage from '../schema/chatMessageModel.js';
-
-// export const handleMessage = async (req, res) => {
-//   const { userId = 'anonymous', message } = req.body;
-//   const timestamp = new Date().toISOString();
-//   if (!message) {
-//     return res.status(400).json({ error: "Message is required." });
-//   }  
-
-//   try {
-//     // Emit 'message.received' event
-//     eventBus.emit('message.received', { userId, message, timestamp });
-
-//     // Call Gemini API
-//     const reply = await getLLMResponse(message);
-
-//     res.json({ reply });
-//   } catch (error) {
-//     console.error('Gemini API error:', error);
-//     res.status(500).json({ error: 'Failed to get response from Gemini' });
-//   }
-// };
-
 
 export const handleMessage = async (req, res) => {
   const { sessionId = 'anonymous', message } = req.body;
@@ -34,7 +18,7 @@ export const handleMessage = async (req, res) => {
   }
 
   try {
-    // Emit event for logging/analytics (optional)
+    // Emit event for logging/analytics
     eventBus.emit('message.received', { message, timestamp });
 
     // Save user message
@@ -45,8 +29,20 @@ export const handleMessage = async (req, res) => {
       timestamp
     });
 
-    // Get LLM response (no history required)
-    const reply = await getLLMResponse(message);
+    // Load conversation history for context
+    const history = await ChatMessage.find({ sessionId })
+      .sort({ timestamp: 1 })
+      .limit(20)
+      .lean();
+
+    const conversationHistory = history.map((msg) => ({
+      role: msg.sender === 'user' ? 'user' : 'bot',
+      text: msg.text,
+    }));
+
+    // Run the agent loop (replaces getLLMResponse)
+    console.log(`[Chat] Session ${sessionId}: "${message.substring(0, 80)}..."`);
+    const reply = await runAgent(message, conversationHistory);
 
     // Save bot response
     await ChatMessage.create({
@@ -64,27 +60,15 @@ export const handleMessage = async (req, res) => {
   }
 };
 
-
-
 export const createSession = async (req, res) => {
   try {
-    // const { _id, ticketId, startedAt, initiatedBy } = req.body;
-
-    // const newSession = new ChatSession({
-    //   _id,
-    //   ticketId,
-    //   startedAt: new Date(startedAt),
-    //   initiatedBy,
-    // });
-
     const { sessionId, message } = req.body;
 
     if (!sessionId || !message) {
       return res.status(400).json({ error: "sessionId and message are required." });
     }
 
-    
-// Check or create session
+    // Check or create session
     let session = await ChatSession.findById(sessionId);
     if (!session) {
       session = new ChatSession({
@@ -99,5 +83,4 @@ export const createSession = async (req, res) => {
     console.error('Error creating session:', error);
     res.status(500).json({ error: 'Failed to create chat session' });
   }
-
 };
